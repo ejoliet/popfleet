@@ -14,3 +14,7 @@ popfleet.json
 # tooling noise
 .omc/
 .claude/
+
+# python bytecode (agent.py is a plain script; nothing here is source)
+__pycache__/
+*.pyc

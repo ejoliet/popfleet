@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>popfleet</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin: 0; background: #14161a; color: #d8dee9; font: 15px/1.5 system-ui, sans-serif; }
+  header { display: flex; align-items: center; gap: 12px; padding: 14px 20px; border-bottom: 1px solid #2a2e36; }
+  header h1 { font-size: 17px; margin: 0; letter-spacing: .5px; }
+  header .spacer { flex: 1; }
+  button { background: #2e6df6; color: #fff; border: 0; border-radius: 6px; padding: 7px 14px; font: inherit; cursor: pointer; }
+  button.ghost { background: transparent; color: #9aa5b1; border: 1px solid #3a4048; }
+  button.danger { background: transparent; color: #e06c75; border: 1px solid #5a3038; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 10px 20px; border-bottom: 1px solid #23272f; }
+  th { color: #7b8494; font-weight: 500; font-size: 13px; }
+  .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 8px; vertical-align: baseline; }
+  .on  { background: #4cc38a; box-shadow: 0 0 6px #4cc38a88; }
+  .off { background: #e06c75; }
+  .muted { color: #7b8494; }
+  #empty { padding: 48px 20px; text-align: center; color: #7b8494; }
+  dialog { background: #1b1e24; color: inherit; border: 1px solid #2a2e36; border-radius: 10px; max-width: 720px; width: 90%; }
+  dialog::backdrop { background: #000a; }
+  pre { background: #101216; border: 1px solid #2a2e36; border-radius: 6px; padding: 10px 12px; overflow-x: auto; font-size: 13px; white-space: pre-wrap; word-break: break-all; }
+  .blk { position: relative; }
+  .blk button { position: absolute; top: 8px; right: 8px; padding: 3px 9px; font-size: 12px; }
+  #toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 8px; z-index: 10; }
+  .toast { background: #1b1e24; border: 1px solid #3a4048; border-left: 4px solid #2e6df6; border-radius: 6px; padding: 10px 14px; min-width: 220px; animation: fade 4s forwards; }
+  .toast.join  { border-left-color: #4cc38a; }
+  .toast.leave { border-left-color: #e06c75; }
+  @keyframes fade { 0%,85% { opacity: 1; } 100% { opacity: 0; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>popfleet</h1>
+  <span class="spacer"></span>
+  <button id="add">Add machine</button>
+</header>
+<table id="tbl" hidden>
+  <thead><tr><th>Machine</th><th>Last seen</th><th>Agent</th><th>Sessions</th><th></th></tr></thead>
+  <tbody id="rows"></tbody>
+</table>
+<div id="empty">No machines yet — click “Add machine” to mint an enrollment token.</div>
+
+<dialog id="enroll">
+  <h2>Enroll a machine</h2>
+  <p class="muted">Token minted. Paste one of these on the box — it appears on the panel within seconds.</p>
+  <h3>Any box (shell installer)</h3>
+  <div class="blk"><pre id="blk-sh"></pre><button data-copy="blk-sh" class="ghost">copy</button></div>
+  <h3>Podman / Docker (ephemeral)</h3>
+  <div class="blk"><pre id="blk-podman"></pre><button data-copy="blk-podman" class="ghost">copy</button></div>
+  <h3>Python reference agent (app hook)</h3>
+  <div class="blk"><pre id="blk-py"></pre><button data-copy="blk-py" class="ghost">copy</button></div>
+  <p style="text-align:right"><button id="enroll-close" class="ghost">Close</button></p>
+</dialog>
+
+<div id="toasts"></div>
+<script src="/index.js"></script>
+</body>
+</html>
