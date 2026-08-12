@@ -1,0 +1,16 @@
+# secrets — never commit (cullroom rule: this file lands before the first token is minted)
+.env
+*.env
+popfleet.env
+
+# local state (JSON store lives next to the binary)
+popfleet.json
+*.json.tmp
+
+# build artifacts
+/popfleet
+/popfleet-*
+
+# tooling noise
+.omc/
+.claude/
