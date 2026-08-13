@@ -1,0 +1,34 @@
+// popfleet v2 relay: one Worker + one Durable Object. Full setup: README.md
+// in this directory. Short version:
+//
+//   cd worker
+//   ./sync-assets.sh                       # panel + agent scripts -> public/
+//   npx wrangler secret put POPFLEET_ADMIN_TOKEN
+//   npx wrangler deploy
+//
+// URL = "name" below + the account subdomain (a Cloudflare account setting,
+// not in this repo): https://popfleet.ejoliet.workers.dev, TLS included.
+// The E2E fleet key (POPFLEET_E2E_KEY) is deliberately NOT a Worker secret:
+// the relay must never hold it. It lives only in agents' env and the panel's
+// localStorage (docs/RDD-v2.md).
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "popfleet",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-01",
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS",
+    // Everything dynamic runs in the Worker; all other paths (panel pages,
+    // vendor JS, agent.sh/agent.py, config.json) are served as static assets
+    // with the CSP from public/_headers.
+    "run_worker_first": ["/api/*", "/ws/*", "/term/*", "/healthz"]
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "FLEET", "class_name": "Fleet" }]
+  },
+  // SQLite-backed DO: required on the free plan, and the storage class the
+  // RDD-v2 open question wants soak numbers for.
+  "migrations": [{ "tag": "v2-0", "new_sqlite_classes": ["Fleet"] }],
+  "observability": { "enabled": true }
+}

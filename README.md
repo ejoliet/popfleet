@@ -6,8 +6,15 @@
 
 ## What it is
 
-A broker and as many agents as you have machines. The broker is one static Go binary
-(`popfleet serve`) that hosts the panel, a small HTTP API and two WebSocket endpoints.
+A broker and as many agents as you have machines. The broker comes in two
+interchangeable flavors:
+
+- **v2 Worker relay** (recommended): a Cloudflare Worker + one Durable Object.
+  `wrangler deploy`, TLS included, no server owned — and every session is
+  **end-to-end encrypted**, so the relay carries ciphertext it cannot read.
+  See [The v2 relay](#the-v2-relay-wrangler-deploy-done).
+- **v1 Go broker** (LAN/jumpbox mode): one static Go binary
+  (`popfleet serve`) that hosts the panel, a small HTTP API and two WebSocket endpoints.
 An agent is the same binary (`popfleet agent`), a container image, or a single Python
 file you can embed in an app you already run — all three speak the same protocol and
 are equal citizens on the panel.
@@ -27,7 +34,52 @@ State is a JSON file plus a mutex, sitting next to the binary. The wire contract
 frozen in [docs/PROTOCOL.md](docs/PROTOCOL.md) — that file, not this one, is what the
 three agent implementations follow.
 
-## Quick start
+## The v2 relay: `wrangler deploy`, done
+
+v1's product is zero-onboarding; v1's broker was not — it needed a box, DNS, Caddy
+or tailscale. The v2 relay replaces all of that:
+
+```sh
+cd worker
+npx wrangler secret put POPFLEET_ADMIN_TOKEN   # openssl rand -hex 32
+npx wrangler deploy
+# panel at https://popfleet.ejoliet.workers.dev — TLS included, no server owned
+# (URL = worker "name" in worker/wrangler.jsonc + your account subdomain;
+#  full setup walkthrough: worker/README.md)
+```
+
+Generate the fleet's E2E key once and keep it out of Cloudflare's hands:
+
+```sh
+openssl rand -base64 32    # this is POPFLEET_E2E_KEY
+```
+
+Open the panel, **Add machine**, and the enrollment blocks already carry the key
+(the panel prompts for it once and keeps it in `localStorage`; it is never sent on
+any request). Agents need exactly two env changes versus v1: `POPFLEET_URL`
+pointing at the Worker, plus `POPFLEET_E2E_KEY`.
+
+What the relay sees is protocol v1e ([docs/RDD-v2.md](docs/RDD-v2.md)): frame tags
+and routing metadata in the clear, every `data`/`cmd` value as
+`base64(nonce || AES-256-GCM)` under a per-session key derived from the fleet key —
+`wrangler tail` during a live session shows ciphertext only. A tampered frame fails
+the GCM tag and kills the session with a banner; nothing forged is ever rendered.
+Agents without the key are rejected at hello: plaintext through shared
+infrastructure is not a supported mode.
+
+Two rules the panel cannot enforce for you:
+
+- **Revoking a compromised box is not enough** — it knew the fleet key. Revoke,
+  then rotate: new key, restart the other agents with the new env, paste it once
+  in the panel.
+- Keystroke timing is visible to the relay (traffic analysis of an interactive
+  shell is real). Out of scope for a personal fleet, but said out loud.
+
+The v1 Go broker below stays fully supported as the LAN/jumpbox mode — same
+agents, same panel; without `POPFLEET_E2E_KEY` they speak plain v1 to it.
+Deploy checklist and acceptance gates: [docs/GATES-v2.md](docs/GATES-v2.md).
+
+## Quick start (v1 Go broker, LAN mode)
 
 Two minutes, one machine, no TLS and no other boxes involved. Enroll the laptop you
 are sitting at first — it proves the whole loop works before NAT and certificates get
@@ -208,10 +260,10 @@ Stated plainly, because the pleasant version would be a lie:
 - **The broker can see session bytes.** Everything you type and everything the shell
   prints passes through it. That is acceptable exactly as long as the broker runs on
   hardware you control. It is not acceptable on shared infrastructure.
-- **End-to-end crypto past the broker is v2 debt**, not an oversight — fragment-key
-  AES-GCM, the poptail pattern. It buys nothing while you own the broker, and it is
-  required the day you do not. If you move the broker to someone else's machine, that
-  debt comes due first.
+- **End-to-end crypto past the broker shipped with v2** — the debt named here in v1
+  came due when the broker moved to shared infrastructure. Against the Worker relay
+  every session is AES-256-GCM under a key Cloudflare never holds. On the LAN Go
+  broker it stays optional: it buys nothing while you own the box.
 - **The enrollment token is the machine's identity.** Anything holding a valid token is
   that machine as far as the broker is concerned. Tokens live in `0600` env files on the
   agent side and in `popfleet.json` on the broker side.
@@ -239,9 +291,11 @@ because a display name is not a secret.
 | `POPFLEET_TOKEN` | every agent | yes | Enrollment token from `POST /api/tokens`. This is the machine's identity. |
 | `POPFLEET_NAME` | every agent | no | Display name in the panel. Defaults to the hostname. `popfleet agent --name` overrides it. |
 | `POPFLEET_BIN_URL` | `agent.sh` | no | Where the installer fetches the binary; defaults to the GitHub latest release. |
+| `POPFLEET_E2E_KEY` | every agent + panel | v2 relay: yes | Fleet E2E key, 32 bytes base64 (`openssl rand -base64 32`). Required by the Worker relay; omit against a LAN Go broker. Never reaches the relay. |
 
-The Python agent strips `POPFLEET_TOKEN` and `POPFLEET_URL` from the environment before
-`exec`ing your shell, so the token does not leak into every session you open.
+The Python agent strips `POPFLEET_TOKEN`, `POPFLEET_URL` and `POPFLEET_E2E_KEY` from
+the environment before `exec`ing your shell, so the secrets do not leak into every
+session you open.
 
 ## Cutting a release
 
@@ -285,10 +339,14 @@ The one-time session URL is the whole integration surface: `POST` to
 
 - [docs/RDD.md](docs/RDD.md) — the original v1 spec: purpose, architecture, interface
   contract, security invariants, the gate table, and what was deferred to v2.
-- [docs/GATES.md](docs/GATES.md) — the gate table turned into a hand-run acceptance
+- [docs/RDD-v2.md](docs/RDD-v2.md) — the v2 spec: Worker+DO relay, protocol v1e
+  payload encryption, E2E key lifecycle, the v2 gate table.
+- [docs/GATES.md](docs/GATES.md) — the v1 gate table turned into a hand-run acceptance
   checklist, with the thresholds each gate has to hit.
+- [docs/GATES-v2.md](docs/GATES-v2.md) — the v2 checklist, what is already verified
+  locally, and how to run `contrib/gateharness` against a deployed relay.
 - [docs/PROTOCOL.md](docs/PROTOCOL.md) — the frozen wire contract. Every agent
-  implements exactly this.
+  implements exactly this; v2 changes only the value encoding (v1e, in RDD-v2).
 - [docs/INTEGRATION.md](docs/INTEGRATION.md) — embedding a terminal in your own app.
 - [implementation-notes.md](implementation-notes.md) — one line per non-obvious build
   decision, `DEVIATION:` marking where the code knowingly departs from the RDD.

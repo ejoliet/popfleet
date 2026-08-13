@@ -29,3 +29,15 @@ jobs:
         run: go test -race ./...
       - name: py_compile agent.py
         run: python3 -m py_compile contrib/agent.py
+      - name: worker + panel JS syntax
+        run: |
+          node --check worker/src/index.js
+          node --check worker/src/fleet.js
+          node --check internal/panel/index.js
+          node --check internal/panel/term.js
+      - name: worker assets in sync
+        run: |
+          ./worker/sync-assets.sh
+          if ! git diff --exit-code worker/public; then
+            echo "worker/public is stale: run ./worker/sync-assets.sh and commit"; exit 1
+          fi
