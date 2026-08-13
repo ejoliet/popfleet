@@ -9,9 +9,14 @@ set -eu
 TOKEN="${1:-${POPFLEET_TOKEN:-}}"
 URL="${POPFLEET_URL:-${2:-}}"
 NAME="${POPFLEET_NAME:-$(hostname -s 2>/dev/null || hostname)}"
+E2E_KEY="${POPFLEET_E2E_KEY:-}"
 
 [ -n "$TOKEN" ] || { echo "usage: agent.sh <TOKEN>   (POPFLEET_URL must be set in env)" >&2; exit 1; }
 [ -n "$URL" ]   || { echo "error: POPFLEET_URL is not set" >&2; exit 1; }
+if [ -z "$E2E_KEY" ]; then
+  echo "note: POPFLEET_E2E_KEY is not set. The v2 Worker relay rejects agents" >&2
+  echo "      without it; only a v1 LAN broker accepts plaintext sessions." >&2
+fi
 
 case "$(uname -s)" in
   Linux)  OS=linux ;;
@@ -70,6 +75,7 @@ if [ "$OS" = linux ]; then
 POPFLEET_URL=$URL
 POPFLEET_TOKEN=$TOKEN
 POPFLEET_NAME=$NAME
+${E2E_KEY:+POPFLEET_E2E_KEY=$E2E_KEY}
 EOF
   chmod 600 /etc/popfleet.env
   cat > /etc/systemd/system/popfleet-agent.service <<EOF
@@ -96,6 +102,7 @@ else
 export POPFLEET_URL=$URL
 export POPFLEET_TOKEN=$TOKEN
 export POPFLEET_NAME=$NAME
+${E2E_KEY:+export POPFLEET_E2E_KEY=$E2E_KEY}
 EOF
   chmod 600 "$ENVFILE"
   PLIST="$HOME/Library/LaunchAgents/com.popfleet.agent.plist"

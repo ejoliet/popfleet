@@ -16,6 +16,7 @@ import (
 
 	"github.com/ejoliet/popfleet/internal/agent"
 	"github.com/ejoliet/popfleet/internal/broker"
+	"github.com/ejoliet/popfleet/internal/e2e"
 	"github.com/ejoliet/popfleet/internal/store"
 )
 
@@ -39,7 +40,8 @@ func usage() {
   popfleet serve [--addr 127.0.0.1:7333] [--state popfleet.json] [--insecure]
       env: POPFLEET_ADMIN_TOKEN (required)
   popfleet agent [--name <display name>]
-      env: POPFLEET_URL, POPFLEET_TOKEN (required), POPFLEET_NAME`)
+      env: POPFLEET_URL, POPFLEET_TOKEN (required), POPFLEET_NAME,
+           POPFLEET_E2E_KEY (required for the Worker relay; omit for a LAN broker)`)
 	os.Exit(2)
 }
 
@@ -110,5 +112,12 @@ func runAgent(args []string) {
 	if n == "" {
 		n, _ = os.Hostname()
 	}
-	log.Fatal(agent.Run(url, token, n))
+	var e2eKey []byte
+	if raw := os.Getenv("POPFLEET_E2E_KEY"); raw != "" {
+		var err error
+		if e2eKey, err = e2e.ParseKey(raw); err != nil {
+			log.Fatalf("refusing to start: %v", err)
+		}
+	}
+	log.Fatal(agent.Run(url, token, n, e2eKey))
 }

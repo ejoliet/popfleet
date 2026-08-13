@@ -10,6 +10,7 @@ type Msg struct {
 	Token string `json:"token,omitempty"` // hello
 	Name  string `json:"name,omitempty"`  // hello
 	Ver   string `json:"ver,omitempty"`   // hello
+	E2E   bool   `json:"e2e,omitempty"`   // hello/hello_ok: v1e payload encryption
 	ID    string `json:"id,omitempty"`    // hello_ok
 	Sid   string `json:"sid,omitempty"`
 	Data  string `json:"data,omitempty"` // base64 bytes

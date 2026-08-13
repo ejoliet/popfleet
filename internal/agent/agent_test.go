@@ -12,6 +12,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/ejoliet/popfleet/internal/e2e"
 	"github.com/ejoliet/popfleet/internal/proto"
 )
 
@@ -254,6 +255,11 @@ type running struct {
 // start runs one agent session against the fake broker and hands back the
 // broker side of the socket plus the session's eventual result.
 func (fb *fakeBroker) start(token string) (*websocket.Conn, chan running) {
+	return fb.startE2E(token, nil)
+}
+
+// startE2E is start with a fleet key: the agent speaks protocol v1e.
+func (fb *fakeBroker) startE2E(token string, key []byte) (*websocket.Conn, chan running) {
 	fb.t.Helper()
 	wsURL, err := agentWSURL(fb.url())
 	if err != nil {
@@ -261,7 +267,7 @@ func (fb *fakeBroker) start(token string) (*websocket.Conn, chan running) {
 	}
 	res := make(chan running, 1)
 	go func() {
-		ok, err := session(wsURL, token, "testbox")
+		ok, err := session(wsURL, token, "testbox", key)
 		res <- running{ok, err}
 	}()
 	return fb.accept(), res
@@ -387,6 +393,79 @@ func TestSessionCloseKillsPTY(t *testing.T) {
 	<-res
 }
 
+// ---- protocol v1e (docs/RDD-v2.md): payload encryption ----
+
+func TestSessionE2ERoundTrip(t *testing.T) {
+	requirePTY(t)
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i)
+	}
+	fb := newFakeBroker(t)
+	ws, res := fb.startE2E("tok", key)
+
+	hello := read(t, ws)
+	if !hello.E2E {
+		t.Fatal("hello did not announce e2e:true with a fleet key set")
+	}
+	ws.WriteJSON(proto.Msg{T: "hello_ok", ID: "m1", E2E: true})
+
+	enc, err := e2e.NewSession(key, "s1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws.WriteJSON(proto.Msg{T: "open", Sid: "s1", Cmd: enc.Seal([]byte("printf READY; cat"))})
+	first := wantFrame(t, ws, "out")
+	if _, err := proto.Dec(first.Data); err == nil {
+		// base64 always decodes; the real check is that plaintext is absent
+		if strings.Contains(first.Data, "READY") {
+			t.Fatal("output frame carries plaintext")
+		}
+	}
+	b, err := enc.Open(first.Data)
+	if err != nil {
+		t.Fatalf("output frame does not decrypt: %v", err)
+	}
+	if !strings.Contains(string(b), "READY") {
+		t.Fatalf("decrypted output %q, want READY", b)
+	}
+
+	// Encrypted keystrokes reach the PTY.
+	ws.WriteJSON(proto.Msg{T: "in", Sid: "s1", Data: enc.Seal([]byte("ping\n"))})
+	if b, err := enc.Open(wantFrame(t, ws, "out").Data); err != nil || !strings.Contains(string(b), "ping") {
+		t.Errorf("encrypted keystrokes did not round trip: %q err=%v", b, err)
+	}
+
+	// A tampered frame kills the session with err, renders nothing.
+	ws.WriteJSON(proto.Msg{T: "in", Sid: "s1", Data: enc.Seal([]byte("boom"))[:20] + "AAAA"})
+	m := wantFrame(t, ws, "err")
+	if m.Sid != "s1" || m.Msg == "" {
+		t.Fatalf("tamper err frame = %+v, want sid s1 with a message", m)
+	}
+	if m := wantFrame(t, ws, "exit"); m.Sid != "s1" {
+		t.Fatalf("PTY not killed after tamper: %+v", m)
+	}
+
+	ws.Close()
+	<-res
+}
+
+func TestSessionE2ERejectsPlaintextOpen(t *testing.T) {
+	requirePTY(t)
+	key := make([]byte, 32)
+	fb := newFakeBroker(t)
+	ws, res := fb.startE2E("tok", key)
+	read(t, ws) // hello
+	ws.WriteJSON(proto.Msg{T: "hello_ok", ID: "m1", E2E: true})
+	// A plaintext cmd against an e2e agent must never spawn a shell.
+	ws.WriteJSON(proto.Msg{T: "open", Sid: "s1", Cmd: "echo plaintext"})
+	if m := wantFrame(t, ws, "err"); m.Sid != "s1" {
+		t.Fatalf("plaintext open answered with %+v, want err for s1", m)
+	}
+	ws.Close()
+	<-res
+}
+
 func TestSessionRejectsBadHelloResponse(t *testing.T) {
 	t.Parallel()
 	fb := newFakeBroker(t)
@@ -409,7 +488,7 @@ func TestSessionRejectsBadHelloResponse(t *testing.T) {
 func TestSessionDialFailureIsNotHelloOK(t *testing.T) {
 	t.Parallel()
 	// Nothing is listening: a dial failure must not reset the backoff.
-	ok, err := session("ws://127.0.0.1:1/ws/agent", "tok", "n")
+	ok, err := session("ws://127.0.0.1:1/ws/agent", "tok", "n", nil)
 	if ok {
 		t.Error("failed dial reported a successful hello")
 	}

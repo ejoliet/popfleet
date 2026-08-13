@@ -18,6 +18,7 @@ import (
 	"github.com/creack/pty"
 	"github.com/gorilla/websocket"
 
+	"github.com/ejoliet/popfleet/internal/e2e"
 	"github.com/ejoliet/popfleet/internal/proto"
 )
 
@@ -28,14 +29,16 @@ var Version = "dev"
 
 // Run dials the broker and never returns (reconnect loop with backoff
 // 1 s doubling to 30 s, ±20% jitter), except on a config error.
-func Run(rawURL, token, name string) error {
+// e2eKey nil = plaintext v1 (LAN Go broker); 32 bytes = protocol v1e,
+// required by the Worker relay.
+func Run(rawURL, token, name string, e2eKey []byte) error {
 	wsURL, err := agentWSURL(rawURL)
 	if err != nil {
 		return err
 	}
 	backoff := time.Second
 	for {
-		ok, err := session(wsURL, token, name)
+		ok, err := session(wsURL, token, name, e2eKey)
 		if err != nil {
 			log.Printf("agent: connection lost: %v", err)
 		}
@@ -81,11 +84,12 @@ func agentWSURL(raw string) (string, error) {
 type ptySession struct {
 	f   *os.File
 	cmd *exec.Cmd
+	enc *e2e.Session // nil in plaintext v1 mode
 }
 
 // session runs one connection to the broker. Returns hello-succeeded plus
 // the terminal error. On any exit every PTY is killed.
-func session(wsURL, token, name string) (helloOK bool, err error) {
+func session(wsURL, token, name string, e2eKey []byte) (helloOK bool, err error) {
 	ws, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		return false, err
@@ -98,13 +102,26 @@ func session(wsURL, token, name string) (helloOK bool, err error) {
 		defer wmu.Unlock()
 		return ws.WriteJSON(m)
 	}
+	// hb is sent as this exact byte string, not via WriteJSON: the Worker
+	// relay absorbs it with a WebSocket auto-response pair (hibernation stays
+	// cheap) and that match is byte-exact — Encode's trailing newline or a
+	// reordered field would silently wake the DO on every heartbeat.
+	sendHB := func() error {
+		wmu.Lock()
+		defer wmu.Unlock()
+		return ws.WriteMessage(websocket.TextMessage, []byte(`{"t":"hb"}`))
+	}
 
-	if err := send(proto.Msg{T: "hello", Token: token, Name: name, Ver: Version}); err != nil {
+	if err := send(proto.Msg{T: "hello", Token: token, Name: name, Ver: Version, E2E: len(e2eKey) > 0}); err != nil {
 		return false, err
 	}
 	ws.SetReadDeadline(time.Now().Add(10 * time.Second))
 	var m proto.Msg
 	if err := ws.ReadJSON(&m); err != nil || m.T != "hello_ok" {
+		if err == nil && m.T == "err" && m.Msg != "" {
+			// v2 relay rejects with a reason (e.g. e2e required); surface it.
+			return false, fmt.Errorf("hello rejected: %s", m.Msg)
+		}
 		return false, fmt.Errorf("hello rejected (bad or revoked token?): %v", err)
 	}
 	log.Printf("agent: connected as machine %s", m.ID)
@@ -140,7 +157,7 @@ func session(wsURL, token, name string) (helloOK bool, err error) {
 			case <-done:
 				return
 			case <-t.C:
-				if send(proto.Msg{T: "hb"}) != nil {
+				if sendHB() != nil {
 					return
 				}
 				ws.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second))
@@ -160,13 +177,31 @@ func session(wsURL, token, name string) (helloOK bool, err error) {
 				pmu.Unlock()
 				continue
 			}
-			p, err := spawn(m.Cmd)
+			pmu.Unlock()
+			var enc *e2e.Session
+			cmdline := m.Cmd
+			if len(e2eKey) > 0 {
+				var b []byte
+				var err error
+				if enc, err = e2e.NewSession(e2eKey, m.Sid); err == nil && cmdline != "" {
+					if b, err = enc.Open(cmdline); err == nil {
+						cmdline = string(b)
+					}
+				}
+				if err != nil { // GCM fail = never run what we cannot authenticate
+					log.Printf("agent: e2e open rejected for sid %s: %v", m.Sid, err)
+					send(proto.Msg{T: "err", Sid: m.Sid, Msg: "e2e decrypt failed (key mismatch or tampered cmd)"})
+					continue
+				}
+			}
+			p, err := spawn(cmdline)
 			if err != nil {
-				pmu.Unlock()
 				log.Printf("agent: spawn failed for sid %s: %v", m.Sid, err)
 				send(proto.Msg{T: "exit", Sid: m.Sid, Code: proto.Int(127)})
 				continue
 			}
+			p.enc = enc
+			pmu.Lock()
 			ptys[m.Sid] = p
 			pmu.Unlock()
 			go pump(p, m.Sid, send, func() {
@@ -175,15 +210,28 @@ func session(wsURL, token, name string) (helloOK bool, err error) {
 				pmu.Unlock()
 			})
 		case "in":
-			b, err := proto.Dec(m.Data)
-			if err != nil {
+			pmu.Lock()
+			p, ok := ptys[m.Sid]
+			pmu.Unlock()
+			if !ok { // unknown sid: ignored, never an error
 				continue
 			}
-			pmu.Lock()
-			if p, ok := ptys[m.Sid]; ok {
-				p.f.Write(b)
+			var b []byte
+			var err error
+			if p.enc != nil {
+				b, err = p.enc.Open(m.Data)
+			} else {
+				b, err = proto.Dec(m.Data)
 			}
-			pmu.Unlock()
+			if err != nil {
+				if p.enc != nil { // tampered/forged keystrokes: kill the session
+					log.Printf("agent: e2e in rejected for sid %s: %v", m.Sid, err)
+					send(proto.Msg{T: "err", Sid: m.Sid, Msg: "e2e decrypt failed (tampered frame)"})
+					p.cmd.Process.Kill() // pump sends exit and forgets the sid
+				}
+				continue
+			}
+			p.f.Write(b)
 		case "resize":
 			pmu.Lock()
 			if p, ok := ptys[m.Sid]; ok {
@@ -220,20 +268,75 @@ func spawn(cmdline string) (*ptySession, error) {
 	return &ptySession{f: f, cmd: c}, nil
 }
 
-// pump copies PTY output to the broker, then reports exit and forgets the sid.
+// Output coalescing: flush every 16 ms or 4 KiB, whichever first. A `yes`
+// firehose as frame-per-read is a per-frame cost through the Worker relay
+// (request count, duration); batched it is a non-issue. Agent-side only,
+// no protocol impact, and the v1 Go broker benefits the same way.
+const (
+	flushEvery = 16 * time.Millisecond
+	flushBytes = 4 * 1024
+)
+
+// pump copies PTY output to the broker (coalesced, encrypted when the
+// session has an e2e key), then reports exit and forgets the sid.
 func pump(p *ptySession, sid string, send func(proto.Msg) error, forget func()) {
-	buf := make([]byte, 8192)
-	for {
-		n, err := p.f.Read(buf)
-		if n > 0 {
-			if send(proto.Msg{T: "out", Sid: sid, Data: proto.Enc(buf[:n])}) != nil {
-				break // socket gone; session() defer kills the PTY
+	chunks := make(chan []byte, 32)
+	go func() { // reader: PTY -> chunks; closes on shell exit
+		defer close(chunks)
+		for {
+			buf := make([]byte, 8192)
+			n, err := p.f.Read(buf)
+			if n > 0 {
+				chunks <- buf[:n]
+			}
+			if err != nil {
+				return // EIO on shell exit is the normal path
 			}
 		}
-		if err != nil {
-			break // EIO on shell exit is the normal path
+	}()
+
+	encode := proto.Enc
+	if p.enc != nil {
+		encode = p.enc.Seal
+	}
+	var buf []byte
+	var deadline <-chan time.Time
+	flush := func() bool {
+		if len(buf) == 0 {
+			return true
+		}
+		ok := send(proto.Msg{T: "out", Sid: sid, Data: encode(buf)}) == nil
+		buf, deadline = nil, nil
+		return ok
+	}
+loop:
+	for {
+		select {
+		case c, ok := <-chunks:
+			if !ok {
+				flush()
+				break loop
+			}
+			buf = append(buf, c...)
+			if len(buf) >= flushBytes {
+				if !flush() {
+					break loop // socket gone; session() defer kills the PTY
+				}
+			} else if deadline == nil {
+				deadline = time.After(flushEvery)
+			}
+		case <-deadline:
+			if !flush() {
+				break loop
+			}
 		}
 	}
+	// Unblock the reader if it is still mid-send (send-failure path); it
+	// exits once session()'s defer kills the PTY and the read errors.
+	go func() {
+		for range chunks {
+		}
+	}()
 	code := 0
 	if err := p.cmd.Wait(); err != nil {
 		if ee, ok := err.(*exec.ExitError); ok {

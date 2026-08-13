@@ -2,6 +2,12 @@
 
 Frozen for v1. Broker, Go agent, and the reference Python agent all implement exactly this.
 
+> v2 note: against the Worker relay, agents speak **v1e** — same tags, fields and
+> flow, but every `data` value and the `open` frame's `cmd` carry
+> `base64( nonce(12) || AES-256-GCM ciphertext )` instead of plaintext bytes, and
+> `hello`/`hello_ok` gain `"e2e":true`. The unknown-tags-ignored rule below is what
+> makes this a value-encoding change, not a fork. Details: [RDD-v2.md](RDD-v2.md).
+
 ## Transport
 
 All WebSocket messages are JSON text frames, one JSON object per frame.

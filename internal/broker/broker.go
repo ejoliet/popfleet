@@ -359,7 +359,7 @@ func (b *Broker) wsAgent(w http.ResponseWriter, r *http.Request) {
 			b.st.Touch(m.ID, "", "")
 		case "out":
 			b.toBrowser(ac, f.Sid, proto.Msg{T: "out", Data: f.Data})
-		case "exit":
+		case "exit", "err": // err: v1e agent killed the session (GCM auth failure)
 			b.mu.Lock()
 			s := b.sess[f.Sid]
 			if s != nil && s.mid != ac.mid { // not this agent's session to end
@@ -369,7 +369,11 @@ func (b *Broker) wsAgent(w http.ResponseWriter, r *http.Request) {
 			}
 			b.mu.Unlock()
 			if s != nil {
-				s.close(&proto.Msg{T: "exit", Code: f.Code})
+				if f.T == "err" {
+					s.close(&proto.Msg{T: "err", Msg: f.Msg})
+				} else {
+					s.close(&proto.Msg{T: "exit", Code: f.Code})
+				}
 			}
 		}
 	}
